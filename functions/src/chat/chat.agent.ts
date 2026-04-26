@@ -54,6 +54,14 @@ import {updateModelLogFiles} from '../log.utils';
 // Functions for preparing, querying, and organizing agent chat responses.
 // ****************************************************************************
 
+// Maximum number of messages allowed between an agent's trigger message and
+// the current end of the chat before the agent's response is considered too
+// stale to post. Setting this above 0 lets multiple agents respond to the
+// same trigger in a multi-agent debate (their LLM calls finish at different
+// times); 0 would restore the strict "must still be the latest message"
+// behavior.
+const MAX_MOVED_ON_MESSAGE_GAP = 5;
+
 /** Use persona chat prompt to create and send agent chat message. */
 export async function createAgentChatMessageFromPrompt(
   experimentId: string,
@@ -450,38 +458,48 @@ export async function sendAgentGroupChatMessage(
     await awaitTypingDelay(chatMessage.message, chatSettings.wordsPerMinute);
   }
 
-  // Check if the conversation has moved on,
-  // i.e., trigger chat ID is no longer that latest message
-  // Skip this check for initial messages (empty triggerChatId)
+  // Check if the conversation has moved on past the configured grace window.
+  // Allowing a small gap lets multiple agents respond to the same trigger
+  // message in a multi-agent debate (their LLM calls finish at slightly
+  // different times); messages further behind than MAX_MOVED_ON_MESSAGE_GAP
+  // are dropped as too stale.
+  // Skip this check for initial messages (empty triggerChatId).
   if (triggerChatId !== '') {
     const chatHistory = await getFirestorePublicStageChatMessages(
       experimentId,
       cohortId,
       stageId,
     );
-    if (
-      chatHistory.length > 0 &&
-      chatHistory[chatHistory.length - 1].id !== triggerChatId
-    ) {
-      // TODO: Write chat log
-      console.log('Conversation has moved on');
-      return true; // expected outcome (TODO: return status enum)
+    const triggerIndex = chatHistory.findIndex((m) => m.id === triggerChatId);
+    if (triggerIndex !== -1) {
+      const messagesSinceTrigger = chatHistory.length - 1 - triggerIndex;
+      if (messagesSinceTrigger > MAX_MOVED_ON_MESSAGE_GAP) {
+        // TODO: Write chat log
+        console.log(
+          `Conversation has moved on (${messagesSinceTrigger} messages past trigger)`,
+        );
+        return true; // expected outcome (TODO: return status enum)
+      }
     }
   }
 
-  // Don't send a message if the conversation already has a response
-  // to the trigger message by the same type of agent (participant, mediator)
-  // For initial messages (empty triggerChatId), skip this check as it's handled earlier
+  // Don't send a message if THIS agent has already responded to the trigger
+  // message. Keying the trigger-log on senderId (rather than agent type) lets
+  // each agent post once per trigger, instead of letting the first agent of a
+  // given type claim the slot for every other agent of the same type.
+  // For initial messages (empty triggerChatId), skip this check as it's handled earlier.
   if (triggerChatId !== '') {
     const triggerResponseDoc = getGroupChatTriggerLogRef(
       experimentId,
       cohortId,
       stageId,
-      `${triggerChatId}-${chatMessage.type}`,
+      `${triggerChatId}-${chatMessage.senderId}`,
     );
     const hasTriggerResponse = (await triggerResponseDoc.get()).exists;
     if (hasTriggerResponse) {
-      console.log('Someone already responded');
+      console.log(
+        `Agent ${chatMessage.senderId} already responded to ${triggerChatId}`,
+      );
       return true; // expected outcome (TODO: return status enum)
     }
 
@@ -522,38 +540,43 @@ export async function sendAgentPrivateChatMessage(
     await awaitTypingDelay(chatMessage.message, chatSettings.wordsPerMinute);
   }
 
-  // Check if the conversation has moved on,
-  // i.e., trigger chat ID is no longer that latest message
-  // Skip this check for initial messages (empty triggerChatId)
+  // Check if the conversation has moved on past the configured grace window.
+  // See sendAgentGroupChatMessage for rationale.
+  // Skip this check for initial messages (empty triggerChatId).
   if (triggerChatId !== '') {
     const chatHistory = await getFirestorePrivateChatMessages(
       experimentId,
       participantId,
       stageId,
     );
-    if (
-      chatHistory.length > 0 &&
-      chatHistory[chatHistory.length - 1].id !== triggerChatId
-    ) {
-      // TODO: Write chat log
-      console.log('Conversation has moved on');
-      return true; // expected outcome (TODO: return status enum)
+    const triggerIndex = chatHistory.findIndex((m) => m.id === triggerChatId);
+    if (triggerIndex !== -1) {
+      const messagesSinceTrigger = chatHistory.length - 1 - triggerIndex;
+      if (messagesSinceTrigger > MAX_MOVED_ON_MESSAGE_GAP) {
+        // TODO: Write chat log
+        console.log(
+          `Conversation has moved on (${messagesSinceTrigger} messages past trigger)`,
+        );
+        return true; // expected outcome (TODO: return status enum)
+      }
     }
   }
 
-  // Don't send a message if the conversation already has a response
-  // to the trigger message by the same type of agent (participant, mediator)
-  // For initial messages (empty triggerChatId), skip this check as it's handled earlier
+  // Don't send a message if THIS agent has already responded to the trigger
+  // message. See sendAgentGroupChatMessage for rationale.
+  // For initial messages (empty triggerChatId), skip this check as it's handled earlier.
   if (triggerChatId !== '') {
     const triggerResponseDoc = getPrivateChatTriggerLogRef(
       experimentId,
       participantId,
       stageId,
-      `${triggerChatId}-${chatMessage.type}`,
+      `${triggerChatId}-${chatMessage.senderId}`,
     );
     const hasTriggerResponse = (await triggerResponseDoc.get()).exists;
     if (hasTriggerResponse) {
-      console.log('Someone already responded');
+      console.log(
+        `Agent ${chatMessage.senderId} already responded to ${triggerChatId}`,
+      );
       return true; // expected outcome (TODO: return status enum)
     }
 
